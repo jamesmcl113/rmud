@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{tcp::OwnedWriteHalf, TcpStream},
     sync::{mpsc, Mutex},
 };
@@ -24,9 +24,25 @@ impl Task {
         }
     }
 
-    pub fn send_command(cmd: &str) -> Result<Task, String> {
+    pub fn send_command(cmd: &str, args: &[&str]) -> Result<Task, String> {
         let config = match cmd {
             "who" => TaskConfig::Command(model::UserActions::GetUsers),
+            "rooms" | "rs" => TaskConfig::Command(model::UserActions::GetRooms),
+            "pm" => {
+                let to = args.get(0).ok_or("Expected a username.")?;
+                let msg = &args[1..].join(" ");
+
+                TaskConfig::Command(model::UserActions::PrivateMessage {
+                    to: to.to_string(),
+                    msg: msg.to_string(),
+                })
+            }
+            "mv" => {
+                let new_room = args.get(0).ok_or("Expected a room name.")?;
+                TaskConfig::Command(model::UserActions::MoveRoom {
+                    room_name: new_room.to_string(),
+                })
+            }
             _ => {
                 return Err(format!("Unkown command: {cmd}"));
             }

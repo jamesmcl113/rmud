@@ -25,18 +25,79 @@ struct ServerMessage {
 }
 
 enum MessageType {
-    Chat(String),
+    Public(String),
+    Private(String),
     Server(String),
+}
+
+struct UserData {
+    username: String,
+    room_name: String,
 }
 
 struct State<'a> {
     textarea: tui_textarea::TextArea<'a>,
     messages: Vec<ServerMessage>,
+    user_data: Option<UserData>,
+}
+
+impl State<'_> {
+    pub fn push_message(&mut self, res: model::Response) {
+        let timestamp = Local::now();
+        let message = match res {
+            model::Response::Chat(chat_data) => match chat_data {
+                model::ChatMessage::Private(msg) => ServerMessage {
+                    ty: MessageType::Private(msg),
+                    timestamp,
+                },
+                model::ChatMessage::Public(msg) => ServerMessage {
+                    ty: MessageType::Public(msg),
+                    timestamp,
+                },
+            },
+            model::Response::Game(_) => todo!(),
+            model::Response::Server(server_msg) => match server_msg {
+                model::ServerResponse::JoinedServer {
+                    room_name,
+                    username,
+                } => {
+                    self.user_data = Some(UserData {
+                        username: username.clone(),
+                        room_name: room_name.clone(),
+                    });
+                    ServerMessage {
+                        ty: MessageType::Server(format!("{username} joined room '{room_name}'.")),
+                        timestamp,
+                    }
+                }
+                model::ServerResponse::OtherUserJoined { name } => ServerMessage {
+                    ty: MessageType::Server(format!("{name} joined the room.")),
+                    timestamp,
+                },
+                model::ServerResponse::General { msg } => ServerMessage {
+                    ty: MessageType::Server(msg.to_string()),
+                    timestamp,
+                },
+                model::ServerResponse::JoinedRoom { room_name } => {
+                    if let Some(ref mut data) = self.user_data {
+                        data.room_name = room_name.clone();
+                    }
+                    ServerMessage {
+                        ty: MessageType::Server(format!("Joined room #{room_name}")),
+                        timestamp,
+                    }
+                }
+            },
+        };
+
+        self.messages.push(message);
+    }
 }
 
 fn send_request(msg: &str, spawner: &TaskSpawner) -> Result<(), String> {
     if let Some(command) = msg.strip_prefix("/") {
-        spawner.spawn_task(Task::send_command(command)?);
+        let args = command.split_whitespace().collect::<Vec<_>>();
+        spawner.spawn_task(Task::send_command(args[0], &args[1..])?);
     } else {
         spawner.spawn_task(Task::send_chat(msg));
     }
@@ -55,6 +116,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = State {
         textarea,
         messages: vec![],
+        user_data: None,
     };
 
     let (spawner, mut rx) = TaskSpawner::new();
@@ -100,23 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         match rx.try_recv() {
-            Ok(res) => match res {
-                model::Response::Chat(msg) => {
-                    let message = ServerMessage {
-                        ty: MessageType::Chat(msg.msg),
-                        timestamp: Local::now(),
-                    };
-                    state.messages.push(message);
-                }
-                model::Response::Game(_) => todo!(),
-                model::Response::Server(msg) => {
-                    let message = ServerMessage {
-                        ty: MessageType::Server(msg),
-                        timestamp: Local::now(),
-                    };
-                    state.messages.push(message);
-                }
-            },
+            Ok(res) => state.push_message(res),
             Err(_) => {}
         }
     }
@@ -126,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn render_message<'a>(msg: &'a ServerMessage) -> Vec<Line<'a>> {
     match &msg.ty {
-        MessageType::Chat(contents) => vec![Line::from(vec![
+        MessageType::Public(contents) => vec![Line::from(vec![
             Span::styled(
                 format!("[{}] ", msg.timestamp.format("%H:%M")),
                 Style::new().yellow().bold(),
@@ -148,6 +194,15 @@ fn render_message<'a>(msg: &'a ServerMessage) -> Vec<Line<'a>> {
 
             lines
         }
+        MessageType::Private(contents) => {
+            vec![Line::from(vec![
+                Span::styled(
+                    format!("[{}] ", msg.timestamp.format("%H:%M")),
+                    Style::new().green().bold(),
+                ),
+                Span::styled(contents, Style::new().bold()),
+            ])]
+        }
     }
 }
 
@@ -155,10 +210,14 @@ fn ui(f: &mut Frame, state: &State) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
-        .constraints([Constraint::Percentage(80), Constraint::Max(3)])
+        .constraints([
+            Constraint::Max(1),
+            Constraint::Percentage(80),
+            Constraint::Max(3),
+        ])
         .split(f.size());
 
-    let max_messages = chunks[0].height - 2;
+    let max_messages = chunks[1].height - 2;
 
     let messages = state
         .messages
@@ -175,8 +234,21 @@ fn ui(f: &mut Frame, state: &State) {
         .scroll((offset, 0))
         .block(Block::default().borders(Borders::ALL));
 
-    f.render_widget(para, chunks[0]);
-    f.render_widget(state.textarea.widget(), chunks[1]);
+    let status_line = match &state.user_data {
+        Some(UserData {
+            username,
+            room_name,
+        }) => Paragraph::new(Line::from(vec![
+            Span::styled(username, Style::new().bold()),
+            Span::from(" in #"),
+            Span::styled(room_name, Style::new().yellow()),
+        ])),
+        None => Paragraph::new("..."),
+    };
+
+    f.render_widget(status_line, chunks[0]);
+    f.render_widget(para, chunks[1]);
+    f.render_widget(state.textarea.widget(), chunks[2]);
 }
 
 fn reset_terminal(terminal: &mut CrosstermTerminal) -> Result<(), Box<dyn std::error::Error>> {

@@ -9,6 +9,9 @@ pub enum Request {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum UserActions {
     GetUsers,
+    GetRooms,
+    PrivateMessage { to: String, msg: String },
+    MoveRoom { room_name: String },
 }
 
 impl Into<Vec<u8>> for Request {
@@ -21,7 +24,15 @@ impl Into<Vec<u8>> for Request {
 pub enum Response {
     Chat(ChatMessage),
     Game(GameUpdate),
-    Server(String),
+    Server(ServerResponse),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ServerResponse {
+    JoinedServer { room_name: String, username: String },
+    JoinedRoom { room_name: String },
+    OtherUserJoined { name: String },
+    General { msg: String },
 }
 
 impl Into<Vec<u8>> for Response {
@@ -32,13 +43,16 @@ impl Into<Vec<u8>> for Response {
 
 impl Response {
     pub fn server_msg(msg: &str) -> Response {
-        Response::Server(msg.to_string())
+        Response::Server(ServerResponse::General {
+            msg: msg.to_string(),
+        })
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ChatMessage {
-    pub msg: String,
+pub enum ChatMessage {
+    Private(String),
+    Public(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
