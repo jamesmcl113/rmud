@@ -1,23 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum Request {
-    UserMessage(String),
-    UserAction(UserActions),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum UserActions {
     GetUsers,
     GetRooms,
     PrivateMessage { to: String, msg: String },
     MoveRoom { room_name: String },
-}
-
-impl Into<Vec<u8>> for Request {
-    fn into(self) -> Vec<u8> {
-        bincode::serialize(&self).unwrap()
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,8 +39,14 @@ impl Response {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ChatMessage {
-    Private(String),
-    Public(String),
+    Private(Message),
+    Public(Message),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Message {
+    pub payload: String,
+    pub from: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

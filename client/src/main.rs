@@ -13,7 +13,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 
-use client::{Task, TaskSpawner};
+use client::{RawTask, TaskSpawner};
 
 use chrono::{DateTime, Local};
 
@@ -25,8 +25,8 @@ struct ServerMessage {
 }
 
 enum MessageType {
-    Public(String),
-    Private(String),
+    Public(model::Message),
+    Private(model::Message),
     Server(String),
 }
 
@@ -94,15 +94,10 @@ impl State<'_> {
     }
 }
 
-fn send_request(msg: &str, spawner: &TaskSpawner) -> Result<(), String> {
-    if let Some(command) = msg.strip_prefix("/") {
-        let args = command.split_whitespace().collect::<Vec<_>>();
-        spawner.spawn_task(Task::send_command(args[0], &args[1..])?);
-    } else {
-        spawner.spawn_task(Task::send_chat(msg));
-    }
-
-    Ok(())
+fn send_request(msg: &str, spawner: &TaskSpawner) {
+    spawner.spawn_task(RawTask {
+        msg: msg.to_string(),
+    });
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -140,16 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         event::KeyCode::Enter => {
                             let msg = &state.textarea.lines()[0];
                             if !msg.is_empty() {
-                                match send_request(msg, &spawner) {
-                                    Err(e) => {
-                                        state.messages.push(ServerMessage {
-                                            ty: MessageType::Server(format!("{e}")),
-                                            timestamp: Local::now(),
-                                        });
-                                    }
-                                    _ => {}
-                                }
-                                // clear line
+                                send_request(msg, &spawner);
                                 state.textarea.move_cursor(CursorMove::End);
                                 state.textarea.delete_line_by_head();
                             }
@@ -172,12 +158,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn render_message<'a>(msg: &'a ServerMessage) -> Vec<Line<'a>> {
     match &msg.ty {
-        MessageType::Public(contents) => vec![Line::from(vec![
+        MessageType::Public(model::Message { payload, from }) => vec![Line::from(vec![
             Span::styled(
                 format!("[{}] ", msg.timestamp.format("%H:%M")),
                 Style::new().yellow().bold(),
             ),
-            Span::from(contents),
+            Span::styled(format!("{from}: "), Style::new().bold()),
+            Span::from(payload),
         ])],
         MessageType::Server(contents) => {
             let mut lines = vec![];
@@ -194,13 +181,14 @@ fn render_message<'a>(msg: &'a ServerMessage) -> Vec<Line<'a>> {
 
             lines
         }
-        MessageType::Private(contents) => {
+        MessageType::Private(model::Message { from, payload }) => {
             vec![Line::from(vec![
                 Span::styled(
                     format!("[{}] ", msg.timestamp.format("%H:%M")),
                     Style::new().green().bold(),
                 ),
-                Span::styled(contents, Style::new().bold()),
+                Span::styled(format!("{from}: "), Style::new().green().bold()),
+                Span::styled(payload, Style::new().green().bold()),
             ])]
         }
     }

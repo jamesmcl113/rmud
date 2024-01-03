@@ -6,68 +6,24 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
-use model::Request;
-
-enum TaskConfig {
-    Command(model::UserActions),
-    Chat(String),
-}
-
-pub struct Task {
-    config: TaskConfig,
-}
-
-impl Task {
-    pub fn send_chat(msg: &str) -> Task {
-        Task {
-            config: TaskConfig::Chat(msg.to_string()),
-        }
-    }
-
-    pub fn send_command(cmd: &str, args: &[&str]) -> Result<Task, String> {
-        let config = match cmd {
-            "who" => TaskConfig::Command(model::UserActions::GetUsers),
-            "rooms" | "rs" => TaskConfig::Command(model::UserActions::GetRooms),
-            "pm" => {
-                let to = args.get(0).ok_or("Expected a username.")?;
-                let msg = &args[1..].join(" ");
-
-                TaskConfig::Command(model::UserActions::PrivateMessage {
-                    to: to.to_string(),
-                    msg: msg.to_string(),
-                })
-            }
-            "mv" => {
-                let new_room = args.get(0).ok_or("Expected a room name.")?;
-                TaskConfig::Command(model::UserActions::MoveRoom {
-                    room_name: new_room.to_string(),
-                })
-            }
-            _ => {
-                return Err(format!("Unkown command: {cmd}"));
-            }
-        };
-        Ok(Task { config })
-    }
+pub struct RawTask {
+    pub msg: String,
 }
 
 pub struct TaskSpawner {
-    send: mpsc::Sender<Task>,
+    send: mpsc::Sender<RawTask>,
 }
 
-async fn handle_task(socket: Arc<Mutex<OwnedWriteHalf>>, task: Task) {
+async fn handle_task_raw(socket: Arc<Mutex<OwnedWriteHalf>>, task: RawTask) {
     let mut socket = socket.lock().await;
-    let bytes: Vec<u8> = match task.config {
-        TaskConfig::Chat(msg) => Request::UserMessage(msg).into(),
-        TaskConfig::Command(cmd) => Request::UserAction(cmd).into(),
-    };
+    let bytes = task.msg.as_bytes();
     socket.write_all(&bytes).await.unwrap();
     socket.flush().await.unwrap();
 }
 
 impl TaskSpawner {
     pub fn new() -> (TaskSpawner, mpsc::Receiver<model::Response>) {
-        let (send, mut recv) = mpsc::channel::<Task>(100);
+        let (send, mut recv) = mpsc::channel::<RawTask>(100);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -98,7 +54,7 @@ impl TaskSpawner {
                         }
                         task = recv.recv() => {
                             if let Some(task) = task {
-                                tokio::spawn(handle_task(writer.clone(), task));
+                                tokio::spawn(handle_task_raw(writer.clone(), task));
                             }
                         }
                     }
@@ -109,7 +65,7 @@ impl TaskSpawner {
         (TaskSpawner { send }, rx)
     }
 
-    pub fn spawn_task(&self, task: Task) {
+    pub fn spawn_task(&self, task: RawTask) {
         match self.send.blocking_send(task) {
             Ok(_) => {}
             Err(_) => panic!("The shared runtime has shut down."),
