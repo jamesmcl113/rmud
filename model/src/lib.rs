@@ -1,11 +1,20 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UserAction {
+    pub room_name: String,
+    pub action: UserActions,
+}
+
+impl Into<Vec<u8>> for UserAction {
+    fn into(self) -> Vec<u8> {
+        bincode::serialize(&self).unwrap()
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum UserActions {
-    GetUsers,
-    GetRooms,
-    PrivateMessage { to: String, msg: String },
-    MoveRoom { room_name: String },
+    Chat(ChatMessage),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -17,10 +26,10 @@ pub enum Response {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ServerResponse {
-    JoinedServer { room_name: String, username: String },
+    JoinedServer { username: String },
     JoinedRoom { room_name: String },
     OtherUserJoined { name: String },
-    General { msg: String },
+    General { room_name: String, msg: String },
 }
 
 impl Into<Vec<u8>> for Response {
@@ -30,9 +39,10 @@ impl Into<Vec<u8>> for Response {
 }
 
 impl Response {
-    pub fn server_msg(msg: &str) -> Response {
+    pub fn server_msg(msg: &str, room_name: &str) -> Response {
         Response::Server(ServerResponse::General {
             msg: msg.to_string(),
+            room_name: room_name.to_string(),
         })
     }
 }

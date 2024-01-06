@@ -1,8 +1,10 @@
 mod client;
 
+use model::{ChatMessage, Message, UserAction, UserActions};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
+use std::collections::HashMap;
 use std::io::Stdout;
 use std::time::Duration;
 use tui_textarea::CursorMove;
@@ -32,71 +34,54 @@ enum MessageType {
 
 struct UserData {
     username: String,
-    room_name: String,
 }
 
 struct State<'a> {
     textarea: tui_textarea::TextArea<'a>,
-    messages: Vec<ServerMessage>,
+    room_messages: HashMap<String, Vec<ServerMessage>>,
     user_data: Option<UserData>,
 }
 
 impl State<'_> {
-    pub fn push_message(&mut self, res: model::Response) {
+    pub fn handle_response(&mut self, res: model::Response) {
         let timestamp = Local::now();
-        let message = match res {
-            model::Response::Chat(chat_data) => match chat_data {
-                model::ChatMessage::Private(msg) => ServerMessage {
-                    ty: MessageType::Private(msg),
-                    timestamp,
-                },
-                model::ChatMessage::Public(msg) => ServerMessage {
-                    ty: MessageType::Public(msg),
-                    timestamp,
-                },
-            },
-            model::Response::Game(_) => todo!(),
-            model::Response::Server(server_msg) => match server_msg {
-                model::ServerResponse::JoinedServer {
-                    room_name,
-                    username,
-                } => {
-                    self.user_data = Some(UserData {
-                        username: username.clone(),
-                        room_name: room_name.clone(),
-                    });
-                    ServerMessage {
-                        ty: MessageType::Server(format!("{username} joined room '{room_name}'.")),
-                        timestamp,
-                    }
-                }
-                model::ServerResponse::OtherUserJoined { name } => ServerMessage {
-                    ty: MessageType::Server(format!("{name} joined the room.")),
-                    timestamp,
-                },
-                model::ServerResponse::General { msg } => ServerMessage {
-                    ty: MessageType::Server(msg.to_string()),
-                    timestamp,
-                },
-                model::ServerResponse::JoinedRoom { room_name } => {
-                    if let Some(ref mut data) = self.user_data {
-                        data.room_name = room_name.clone();
-                    }
-                    ServerMessage {
-                        ty: MessageType::Server(format!("Joined room #{room_name}")),
-                        timestamp,
-                    }
-                }
-            },
-        };
 
-        self.messages.push(message);
+        match res {
+            model::Response::Chat(_) => todo!(),
+            model::Response::Game(_) => todo!(),
+            model::Response::Server(res) => self.handle_server_response(res),
+        }
+    }
+
+    pub fn handle_server_response(&mut self, res: model::ServerResponse) {
+        match res {
+            model::ServerResponse::JoinedServer { username } => match self.user_data {
+                None => self.user_data = Some(UserData { username }),
+                Some(_) => {
+                    panic!("Received extra JoinedServer response!")
+                }
+            },
+            model::ServerResponse::JoinedRoom { room_name } => {
+                match self.room_messages.insert(room_name, vec![]) {
+                    Some(_) => panic!("Received duplicate JoinedRoom res for {room_name}"),
+                    None => {}
+                }
+            }
+            model::ServerResponse::OtherUserJoined { name } => todo!(),
+            model::ServerResponse::General { room_name, msg } => todo!(),
+        }
     }
 }
 
-fn send_request(msg: &str, spawner: &TaskSpawner) {
+fn send_request(msg: &str, name: &str, spawner: &TaskSpawner) {
     spawner.spawn_task(RawTask {
-        msg: msg.to_string(),
+        req: UserAction {
+            room_name: "main".to_string(),
+            action: UserActions::Chat(ChatMessage::Public(Message {
+                payload: msg.to_string(),
+                from: name.to_string(),
+            })),
+        },
     });
 }
 
@@ -110,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut state = State {
         textarea,
-        messages: vec![],
+        room_messages: HashMap::new(),
         user_data: None,
     };
 
@@ -135,7 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         event::KeyCode::Enter => {
                             let msg = &state.textarea.lines()[0];
                             if !msg.is_empty() {
-                                send_request(msg, &spawner);
+                                let name = &state.user_data.unwrap().username;
+                                send_request(msg, name, &spawner);
                                 state.textarea.move_cursor(CursorMove::End);
                                 state.textarea.delete_line_by_head();
                             }
@@ -148,7 +134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         match rx.try_recv() {
-            Ok(res) => state.push_message(res),
+            Ok(res) => state.handle_response(res),
             Err(_) => {}
         }
     }
@@ -208,7 +194,7 @@ fn ui(f: &mut Frame, state: &State) {
     let max_messages = chunks[1].height - 2;
 
     let messages = state
-        .messages
+        .room_messages
         .iter()
         .map(|msg| render_message(msg))
         .flatten()

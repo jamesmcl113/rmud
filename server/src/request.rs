@@ -19,8 +19,9 @@ pub async fn handle_request(
     state: Arc<Mutex<Shared>>,
     stream: &mut Stream,
     addr: &SocketAddr,
-    name: &str,
-) -> Result<(), Box<dyn Error>> {
+    username: &str,
+    current_room: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
     let msg = String::from_utf8(data.to_vec())?;
     let mut state = state.lock().await;
 
@@ -31,10 +32,10 @@ pub async fn handle_request(
 
         match *cmd {
             "who" => {
-                get_users(&state, stream).await;
+                get_users(&state, stream, current_room).await;
             }
             "rooms" | "rs" => {
-                get_rooms(&state, stream).await;
+                get_rooms(&state, stream, current_room).await;
             }
             "pm" => {
                 let to = args.get(0).ok_or("Error with pm: Expected a recepient.")?;
@@ -43,63 +44,45 @@ pub async fn handle_request(
                 match state.private_message(&full_message, addr, to).await {
                     Ok(_) => {}
                     Err(_) => {
-                        let res = Response::Server(ServerResponse::General {
-                            msg: format!("Couldn't send message to {to}"),
-                        });
+                        let res = Response::server_msg(
+                            &format!("Couldn't send PM to {to}"),
+                            current_room,
+                        );
                         send_response(stream, res).await;
                     }
                 }
-            }
-            "mv" => {
-                let room_name = args.get(0).ok_or("Error with mv: Expected a room name.")?;
-                let res = match state.move_user_to_room(addr, &room_name) {
-                    Ok(_) => Response::Server(ServerResponse::JoinedRoom {
-                        room_name: room_name.to_string(),
-                    }),
-                    Err(e) => Response::Server(ServerResponse::General {
-                        msg: format!("Couldn't join {room_name}. err = {e}"),
-                    }),
-                };
-
-                send_response(stream, res).await;
             }
             _ => {}
         }
     } else {
         // public message
-        state.broadcast(addr, &msg, Some(name)).await;
+        state
+            .broadcast(addr, &msg, Some(username), current_room)
+            .await;
     }
 
     Ok(())
 }
 
-async fn get_rooms(state: &Shared, stream: &mut Framed<TcpStream, BytesCodec>) {
+async fn get_rooms(state: &Shared, stream: &mut Stream, current_room: &str) {
     let mut room_list = String::from("Joinable rooms:\n");
-    for room_name in &state.rooms {
+    for (room_name, _) in &state.rooms {
         room_list.push_str(room_name);
         room_list.push('\n');
     }
-    send_response(
-        stream,
-        Response::Server(model::ServerResponse::General { msg: room_list }),
-    )
-    .await;
+    send_response(stream, Response::server_msg(&room_list, current_room)).await;
 }
 
-async fn get_users(state: &Shared, stream: &mut Stream) {
+async fn get_users(state: &Shared, stream: &mut Stream, current_room: &str) {
     let mut user_list = String::from("Users in room:\n");
     for user in state.get_users() {
         user_list.push_str(user);
         user_list.push('\n');
     }
-    send_response(
-        stream,
-        Response::Server(model::ServerResponse::General { msg: user_list }),
-    )
-    .await;
+    send_response(stream, Response::server_msg(&user_list, current_room)).await;
 }
 
-async fn send_response(stream: &mut Framed<TcpStream, BytesCodec>, res: Response) {
+pub async fn send_response(stream: &mut Stream, res: Response) {
     let res_bytes: Vec<u8> = res.into();
     stream.send(Bytes::from(res_bytes)).await.unwrap();
 }

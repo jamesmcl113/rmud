@@ -6,8 +6,10 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
+use model::UserAction;
+
 pub struct RawTask {
-    pub msg: String,
+    pub req: UserAction,
 }
 
 pub struct TaskSpawner {
@@ -16,8 +18,8 @@ pub struct TaskSpawner {
 
 async fn handle_task_raw(socket: Arc<Mutex<OwnedWriteHalf>>, task: RawTask) {
     let mut socket = socket.lock().await;
-    let bytes = task.msg.as_bytes();
-    socket.write_all(&bytes).await.unwrap();
+    let req_bytes: Vec<u8> = task.req.into();
+    socket.write_all(&req_bytes).await.unwrap();
     socket.flush().await.unwrap();
 }
 

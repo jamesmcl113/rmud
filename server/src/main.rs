@@ -4,18 +4,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use model::Response;
+use model::{Response, UserAction};
+use request::send_response;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
-use tokio_util::bytes::Bytes;
 use tokio_util::codec::{BytesCodec, Framed};
-
-use futures::SinkExt;
 
 pub struct UserSession {
     name: String,
-    room: usize,
     send: mpsc::UnboundedSender<model::Response>,
 }
 
@@ -28,21 +25,20 @@ impl User {
     pub async fn new(
         state: Arc<Mutex<Shared>>,
         lines: Framed<TcpStream, BytesCodec>,
-        name: &str,
-    ) -> std::io::Result<User> {
+    ) -> std::io::Result<(User, String)> {
         let addr = lines.get_ref().peer_addr()?;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
         let mut state = state.lock().await;
+        let name = state.gen_username();
         let session = UserSession {
-            name: name.to_string(),
-            room: 0,
+            name: name.clone(),
             send: tx,
         };
-        state.peers.insert(addr, session);
+        state.add_user(addr, session);
 
-        Ok(User { bytes: lines, rx })
+        Ok((User { bytes: lines, rx }, name))
     }
 }
 
@@ -50,29 +46,46 @@ impl User {
 // would make adding and removing users easier
 pub struct Shared {
     peers: HashMap<SocketAddr, UserSession>,
-    rooms: Vec<String>,
+    rooms: HashMap<String, Vec<SocketAddr>>,
+    user_count: usize,
 }
 
 impl Shared {
     pub fn new() -> Self {
         Shared {
             peers: HashMap::new(),
-            rooms: vec![String::from("main"), String::from("general")],
+            rooms: HashMap::from([(String::from("main"), vec![])]),
+            user_count: 0,
         }
     }
 
-    fn move_user_to_room(&mut self, user: &SocketAddr, room_name: &str) -> Result<String, String> {
+    fn add_user(&mut self, addr: SocketAddr, session: UserSession) {
+        self.peers.insert(addr, session);
+        self.user_count += 1;
+    }
+
+    fn gen_username(&self) -> String {
+        format!("User-{}", self.user_count)
+    }
+
+    fn add_user_to_room(&mut self, user: &SocketAddr, room_name: &str) -> Result<(), String> {
         let session = self.peers.get_mut(user).ok_or("No session for address")?;
-        let (room_idx, _) = self
+
+        let room = self
             .rooms
-            .iter()
-            .enumerate()
-            .find(|&(_, r)| r == room_name)
-            .ok_or(format!("Room '{room_name}' does not exist"))?;
+            .get_mut(room_name)
+            .ok_or(format!("Room {room_name} does not exist."))?;
 
-        session.room = room_idx;
+        room.push(*user);
 
-        Ok(String::from("main"))
+        session
+            .send
+            .send(Response::Server(model::ServerResponse::JoinedRoom {
+                room_name: room_name.to_string(),
+            }))
+            .unwrap();
+
+        Ok(())
     }
 
     async fn private_message(&self, msg: &str, from: &SocketAddr, to: &str) -> Result<(), String> {
@@ -99,7 +112,13 @@ impl Shared {
             .map_err(|e| format!("Error sending pm: {e:?}"))
     }
 
-    async fn broadcast(&mut self, sender: &SocketAddr, message: &str, from: Option<&str>) {
+    async fn broadcast(
+        &mut self,
+        sender: &SocketAddr,
+        message: &str,
+        from: Option<&str>,
+        room_name: &str,
+    ) {
         let res = match from {
             Some(sender) => model::Response::Chat(model::ChatMessage::Public(model::Message {
                 payload: message.to_string(),
@@ -107,10 +126,11 @@ impl Shared {
             })),
             None => model::Response::Server(model::ServerResponse::General {
                 msg: message.to_string(),
+                room_name: room_name.to_string(),
             }),
         };
-        let cur_room = self.peers.get(sender).unwrap().room;
-        let users_in_room = self.peers.values().filter(|&s| s.room == cur_room);
+        let room = self.rooms.get(room_name).unwrap();
+        let users_in_room = room.iter().filter_map(|user| self.peers.get(user));
         for peer in users_in_room {
             peer.send.send(res.clone()).unwrap();
         }
@@ -142,41 +162,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn send_response(stream: &mut Framed<TcpStream, BytesCodec>, res: Response) {
-    let res_bytes: Vec<u8> = res.into();
-    stream.send(Bytes::from(res_bytes)).await.unwrap();
-}
-
 async fn process(
     stream: TcpStream,
     state: Arc<Mutex<Shared>>,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut bytes = Framed::new(stream, BytesCodec::new());
-
-    send_response(&mut bytes, Response::server_msg("Please enter a username:")).await;
-
-    let name: String = match bytes.next().await {
-        Some(Ok(line)) => String::from_utf8(line.to_vec()).unwrap(),
-        _ => {
-            eprintln!("Failed to get username. Client disconnected.");
-            return Ok(());
-        }
-    };
-
-    let mut user = User::new(state.clone(), bytes, &name).await?;
+    let (mut user, name) = User::new(state.clone(), bytes).await?;
 
     {
         let mut state = state.lock().await;
-        let room_name = state.move_user_to_room(&addr, "main")?;
+        state.add_user_to_room(&addr, "main")?;
 
         // do some validation here...
         let b_msg = format!("{} has joined the chat.", name);
-        state.broadcast(&addr, &b_msg, None).await;
+        state.broadcast(&addr, &b_msg, None, "main").await;
         send_response(
             &mut user.bytes,
             Response::Server(model::ServerResponse::JoinedServer {
-                room_name,
                 username: name.clone(),
             }),
         )
@@ -192,7 +195,13 @@ async fn process(
             // client has sent a message
             result = user.bytes.next() => match result {
                 Some(Ok(msg)) => {
-                    request::handle_request(msg, state.clone(), &mut user.bytes, &addr, &name).await;
+                    let req: UserAction = bincode::deserialize(&msg[..]).unwrap();
+                    match request::handle_request(msg, state.clone(), &mut user.bytes, &addr, &name, &req.room_name).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                            send_response(&mut user.bytes, Response::server_msg(&format!("ERROR: {e}"), &req.room_name)).await;
+                        },
+                    }
                 }
                 Some(Err(e)) => {
                     eprintln!(
@@ -209,7 +218,7 @@ async fn process(
     {
         let mut state = state.lock().await;
         let msg = format!("{name} has left the chat.");
-        state.broadcast(&addr, &msg, None).await;
+        state.broadcast(&addr, &msg, None, "main").await;
         state.remove_user(&addr);
     }
 
