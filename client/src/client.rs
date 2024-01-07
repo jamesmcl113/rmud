@@ -24,14 +24,14 @@ async fn handle_task_raw(socket: Arc<Mutex<OwnedWriteHalf>>, task: RawTask) {
 }
 
 impl TaskSpawner {
-    pub fn new() -> (TaskSpawner, mpsc::Receiver<model::Response>) {
+    pub fn new() -> (TaskSpawner, mpsc::UnboundedReceiver<model::Response>) {
         let (send, mut recv) = mpsc::channel::<RawTask>(100);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
 
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::unbounded_channel();
 
         let socket = rt.block_on(TcpStream::connect("127.0.0.1:8080")).unwrap();
         let (reader, writer) = socket.into_split();
@@ -47,9 +47,9 @@ impl TaskSpawner {
                             match res {
                                 Ok(0) => todo!(),
                                 Ok(n) => {
-                                    let tx = tx.clone();
+                                    //let tx = tx.clone();
                                     let res: model::Response = bincode::deserialize(&buf[0..n]).unwrap();
-                                    tx.send(res).await.unwrap();
+                                    tx.send(res).unwrap();
                                 },
                                 Err(_) => todo!(),
                             }

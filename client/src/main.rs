@@ -2,7 +2,7 @@ mod client;
 
 use model::{ChatMessage, Message, UserAction, UserActions};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::{Frame, Terminal};
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -39,7 +39,9 @@ struct UserData {
 struct State<'a> {
     textarea: tui_textarea::TextArea<'a>,
     room_messages: HashMap<String, Vec<ServerMessage>>,
+    debug_messages: Vec<String>,
     user_data: Option<UserData>,
+    current_tab: Option<String>,
 }
 
 impl State<'_> {
@@ -55,20 +57,30 @@ impl State<'_> {
 
     pub fn handle_server_response(&mut self, res: model::ServerResponse) {
         match res {
-            model::ServerResponse::JoinedServer { username } => match self.user_data {
-                None => self.user_data = Some(UserData { username }),
-                Some(_) => {
-                    panic!("Received extra JoinedServer response!")
+            model::ServerResponse::JoinedServer { username } => {
+                self.debug_messages.push("Joined server".to_string());
+                match self.user_data {
+                    None => self.user_data = Some(UserData { username }),
+                    Some(_) => {
+                        panic!("Received extra JoinedServer response!")
+                    }
                 }
-            },
+            }
             model::ServerResponse::JoinedRoom { room_name } => {
-                match self.room_messages.insert(room_name, vec![]) {
+                self.debug_messages.push("Joined room".to_string());
+                match self.room_messages.insert(room_name.clone(), vec![]) {
                     Some(_) => panic!("Received duplicate JoinedRoom res for {room_name}"),
-                    None => {}
+                    None => self.current_tab = Some(room_name.clone()),
                 }
             }
             model::ServerResponse::OtherUserJoined { name } => todo!(),
-            model::ServerResponse::General { room_name, msg } => todo!(),
+            model::ServerResponse::General { room_name, msg } => {
+                let room_buffer = self.room_messages.get_mut(&room_name).unwrap();
+                room_buffer.push(ServerMessage {
+                    ty: MessageType::Server(msg),
+                    timestamp: Local::now(),
+                });
+            }
         }
     }
 }
@@ -96,12 +108,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = State {
         textarea,
         room_messages: HashMap::new(),
+        debug_messages: Vec::new(),
         user_data: None,
+        current_tab: None,
     };
 
     let (spawner, mut rx) = TaskSpawner::new();
 
     loop {
+        state.debug_messages.push("Polling...".to_string());
+        while let Ok(res) = rx.try_recv() {
+            state.handle_response(res);
+        }
+
         terminal.draw(|f| ui(f, &state))?;
 
         match event::poll(Duration::from_millis(100)) {
@@ -120,10 +139,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         event::KeyCode::Enter => {
                             let msg = &state.textarea.lines()[0];
                             if !msg.is_empty() {
-                                let name = &state.user_data.unwrap().username;
-                                send_request(msg, name, &spawner);
-                                state.textarea.move_cursor(CursorMove::End);
-                                state.textarea.delete_line_by_head();
+                                match &state.user_data {
+                                    Some(data) => {
+                                        send_request(msg, &data.username, &spawner);
+                                        state.textarea.move_cursor(CursorMove::End);
+                                        state.textarea.delete_line_by_head();
+                                    }
+                                    None => todo!(),
+                                }
                             }
                         }
                         _ => {}
@@ -131,11 +154,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             _ => {}
-        }
-
-        match rx.try_recv() {
-            Ok(res) => state.handle_response(res),
-            Err(_) => {}
         }
     }
 
@@ -180,25 +198,27 @@ fn render_message<'a>(msg: &'a ServerMessage) -> Vec<Line<'a>> {
     }
 }
 
-fn ui(f: &mut Frame, state: &State) {
+fn render_message_area(f: &mut Frame, state: &State, area: Rect) {
     let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(2)
-        .constraints([
-            Constraint::Max(1),
-            Constraint::Percentage(80),
-            Constraint::Max(3),
-        ])
-        .split(f.size());
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Min(1)])
+        .split(area);
 
-    let max_messages = chunks[1].height - 2;
+    let max_messages = chunks[0].height - 2;
 
-    let messages = state
-        .room_messages
-        .iter()
-        .map(|msg| render_message(msg))
-        .flatten()
-        .collect::<Vec<_>>();
+    // render another area for debug messages!
+
+    let messages = match state.current_tab {
+        None => vec![],
+        Some(ref room_name) => match state.room_messages.get(room_name) {
+            Some(messages) => messages
+                .iter()
+                .map(|msg| render_message(msg))
+                .flatten()
+                .collect::<Vec<_>>(),
+            None => panic!("Unkown room name {room_name}"),
+        },
+    };
 
     let n_messages = messages.len() as u16;
 
@@ -208,20 +228,43 @@ fn ui(f: &mut Frame, state: &State) {
         .scroll((offset, 0))
         .block(Block::default().borders(Borders::ALL));
 
+    f.render_widget(para, chunks[0]);
+
+    let debug_messages = Paragraph::new(
+        state
+            .debug_messages
+            .iter()
+            .map(|msg| Line::from(msg.as_str()))
+            .collect::<Vec<_>>(),
+    )
+    .block(Block::default().borders(Borders::ALL));
+
+    f.render_widget(debug_messages, chunks[1]);
+}
+
+fn ui(f: &mut Frame, state: &State) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(2)
+        .constraints([Constraint::Max(1), Constraint::Min(10), Constraint::Max(3)])
+        .split(f.size());
+
+    let current_room = match &state.current_tab {
+        Some(name) => name,
+        None => "NONE",
+    };
+
     let status_line = match &state.user_data {
-        Some(UserData {
-            username,
-            room_name,
-        }) => Paragraph::new(Line::from(vec![
+        Some(UserData { username }) => Paragraph::new(Line::from(vec![
             Span::styled(username, Style::new().bold()),
             Span::from(" in #"),
-            Span::styled(room_name, Style::new().yellow()),
+            Span::styled(current_room, Style::new().yellow()),
         ])),
         None => Paragraph::new("..."),
     };
 
     f.render_widget(status_line, chunks[0]);
-    f.render_widget(para, chunks[1]);
+    render_message_area(f, state, chunks[1]);
     f.render_widget(state.textarea.widget(), chunks[2]);
 }
 

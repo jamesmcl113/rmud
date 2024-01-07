@@ -85,4 +85,7 @@ async fn get_users(state: &Shared, stream: &mut Stream, current_room: &str) {
 pub async fn send_response(stream: &mut Stream, res: Response) {
     let res_bytes: Vec<u8> = res.into();
     stream.send(Bytes::from(res_bytes)).await.unwrap();
+    <Framed<TcpStream, BytesCodec> as SinkExt<Bytes>>::flush(stream)
+        .await
+        .unwrap();
 }

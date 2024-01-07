@@ -170,20 +170,29 @@ async fn process(
     let mut bytes = Framed::new(stream, BytesCodec::new());
     let (mut user, name) = User::new(state.clone(), bytes).await?;
 
+    send_response(
+        &mut user.bytes,
+        Response::Server(model::ServerResponse::JoinedServer {
+            username: name.clone(),
+        }),
+    )
+    .await;
+
+    send_response(
+        &mut user.bytes,
+        Response::Server(model::ServerResponse::JoinedRoom {
+            room_name: "main".to_string(),
+        }),
+    )
+    .await;
+
     {
         let mut state = state.lock().await;
-        state.add_user_to_room(&addr, "main")?;
+        //state.add_user_to_room(&addr, "main")?;
 
         // do some validation here...
         let b_msg = format!("{} has joined the chat.", name);
-        state.broadcast(&addr, &b_msg, None, "main").await;
-        send_response(
-            &mut user.bytes,
-            Response::Server(model::ServerResponse::JoinedServer {
-                username: name.clone(),
-            }),
-        )
-        .await;
+        //state.broadcast(&addr, &b_msg, None, "main").await;
     }
 
     loop {
