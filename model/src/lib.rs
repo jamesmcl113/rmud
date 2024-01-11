@@ -1,11 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct UserAction {
-    pub room_name: String,
-    pub action: UserActions,
-}
-
 impl Into<Vec<u8>> for UserAction {
     fn into(self) -> Vec<u8> {
         bincode::serialize(&self).unwrap()
@@ -13,7 +7,7 @@ impl Into<Vec<u8>> for UserAction {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub enum UserActions {
+pub enum UserAction {
     Chat(ChatMessage),
 }
 
@@ -45,18 +39,35 @@ impl Response {
             room_name: room_name.to_string(),
         })
     }
+
+    pub fn public_msg(msg: &str, room_name: &str, from: &str) -> Response {
+        Response::Chat(ChatMessage::Public {
+            room_name: room_name.to_string(),
+            from: from.to_string(),
+            msg: msg.to_string(),
+        })
+    }
+
+    pub fn private_msg(msg: &str, from: &str) -> Response {
+        Response::Chat(ChatMessage::Private {
+            from: from.to_string(),
+            msg: msg.to_string(),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ChatMessage {
-    Private(Message),
-    Public(Message),
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Message {
-    pub payload: String,
-    pub from: String,
+    Private {
+        from: String,
+        msg: String,
+    },
+    Public {
+        room_name: String,
+        from: String,
+        msg: String,
+    },
+    Username(String),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

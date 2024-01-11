@@ -3,28 +3,41 @@ use futures::SinkExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::{net::TcpStream, sync::Mutex};
+use tokio_util::codec::LengthDelimitedCodec;
 use tokio_util::{
     bytes::{Bytes, BytesMut},
-    codec::{BytesCodec, Framed},
+    codec::Framed,
 };
 
 use std::error::Error;
 
-use model::{Response, ServerResponse};
+use model::{Response, UserAction};
 
-type Stream = Framed<TcpStream, BytesCodec>;
+type Stream = Framed<TcpStream, LengthDelimitedCodec>;
 
 pub async fn handle_request(
-    data: BytesMut,
+    req: &UserAction,
     state: Arc<Mutex<Shared>>,
     stream: &mut Stream,
     addr: &SocketAddr,
     username: &str,
-    current_room: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let msg = String::from_utf8(data.to_vec())?;
     let mut state = state.lock().await;
 
+    match req {
+        model::UserAction::Chat(msg) => match msg {
+            model::ChatMessage::Private { from, msg } => todo!(),
+            model::ChatMessage::Public {
+                room_name,
+                from,
+                msg,
+            } => {
+                state.broadcast(addr, &msg, Some(&from), &room_name).await;
+            }
+            model::ChatMessage::Username(_) => todo!(),
+        },
+    }
+    /*
     if let Some(command_msg) = msg.strip_prefix("/") {
         // command
         let tokens = command_msg.split_whitespace().collect::<Vec<_>>();
@@ -60,6 +73,7 @@ pub async fn handle_request(
             .broadcast(addr, &msg, Some(username), current_room)
             .await;
     }
+        */
 
     Ok(())
 }
@@ -85,7 +99,4 @@ async fn get_users(state: &Shared, stream: &mut Stream, current_room: &str) {
 pub async fn send_response(stream: &mut Stream, res: Response) {
     let res_bytes: Vec<u8> = res.into();
     stream.send(Bytes::from(res_bytes)).await.unwrap();
-    <Framed<TcpStream, BytesCodec> as SinkExt<Bytes>>::flush(stream)
-        .await
-        .unwrap();
 }

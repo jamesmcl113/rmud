@@ -6,7 +6,11 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 
-use model::UserAction;
+use futures::SinkExt;
+use tokio_stream::StreamExt;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
+use model::{Response, UserAction};
 
 pub struct RawTask {
     pub req: UserAction,
@@ -33,30 +37,33 @@ impl TaskSpawner {
 
         let (tx, rx) = mpsc::unbounded_channel();
 
+        /*
         let socket = rt.block_on(TcpStream::connect("127.0.0.1:8080")).unwrap();
         let (reader, writer) = socket.into_split();
         let mut reader = BufReader::new(reader);
         let writer = Arc::new(Mutex::new(writer));
+        */
 
         std::thread::spawn(move || {
             rt.block_on(async move {
+                let socket = TcpStream::connect("127.0.0.1:8080").await.unwrap();
+                let mut transport = Framed::new(socket, LengthDelimitedCodec::new());
+
                 loop {
-                    let mut buf = [0u8; 1024];
                     tokio::select! {
-                        res = reader.read(&mut buf) => {
+                        res = transport.next() => {
                             match res {
-                                Ok(0) => todo!(),
-                                Ok(n) => {
-                                    //let tx = tx.clone();
-                                    let res: model::Response = bincode::deserialize(&buf[0..n]).unwrap();
+                                Some(Ok(msg)) => {
+                                    let res: Response = bincode::deserialize(&msg[..]).unwrap();
                                     tx.send(res).unwrap();
                                 },
-                                Err(_) => todo!(),
+                                _ => {}
+}
                             }
-                        }
                         task = recv.recv() => {
                             if let Some(task) = task {
-                                tokio::spawn(handle_task_raw(writer.clone(), task));
+                                let req_bytes: Vec<u8> = task.req.into();
+                                transport.send(req_bytes.into()).await.unwrap();
                             }
                         }
                     }

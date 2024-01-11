@@ -571,9 +571,12 @@ dependencies = [
  "bincode",
  "chrono",
  "crossterm",
+ "futures",
  "model",
  "ratatui",
  "tokio",
+ "tokio-stream",
+ "tokio-util",
  "tui-textarea",
 ]
 

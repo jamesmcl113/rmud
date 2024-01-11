@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use model::{Response, UserAction};
+use model::{ChatMessage, Response, UserAction};
 use request::send_response;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::StreamExt;
-use tokio_util::codec::{BytesCodec, Framed};
+use tokio_util::codec::{BytesCodec, Framed, LengthDelimitedCodec};
 
 pub struct UserSession {
     name: String,
@@ -18,13 +18,13 @@ pub struct UserSession {
 
 struct User {
     rx: mpsc::UnboundedReceiver<model::Response>,
-    bytes: Framed<TcpStream, BytesCodec>,
+    bytes: Framed<TcpStream, LengthDelimitedCodec>,
 }
 
 impl User {
     pub async fn new(
         state: Arc<Mutex<Shared>>,
-        lines: Framed<TcpStream, BytesCodec>,
+        lines: Framed<TcpStream, LengthDelimitedCodec>,
     ) -> std::io::Result<(User, String)> {
         let addr = lines.get_ref().peer_addr()?;
 
@@ -103,12 +103,7 @@ impl Shared {
 
         session
             .send
-            .send(model::Response::Chat(model::ChatMessage::Private(
-                model::Message {
-                    payload: msg.to_string(),
-                    from: from_name.to_owned(),
-                },
-            )))
+            .send(Response::private_msg(msg, &from_name))
             .map_err(|e| format!("Error sending pm: {e:?}"))
     }
 
@@ -120,10 +115,7 @@ impl Shared {
         room_name: &str,
     ) {
         let res = match from {
-            Some(sender) => model::Response::Chat(model::ChatMessage::Public(model::Message {
-                payload: message.to_string(),
-                from: sender.to_string(),
-            })),
+            Some(sender) => Response::public_msg(message, room_name, sender),
             None => model::Response::Server(model::ServerResponse::General {
                 msg: message.to_string(),
                 room_name: room_name.to_string(),
@@ -167,32 +159,39 @@ async fn process(
     state: Arc<Mutex<Shared>>,
     addr: SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut bytes = Framed::new(stream, BytesCodec::new());
+    let bytes = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut user, name) = User::new(state.clone(), bytes).await?;
+
+    let username = match user.bytes.next().await {
+        Some(Ok(msg)) => {
+            let name_req: UserAction = bincode::deserialize(&msg[..]).unwrap();
+            if let UserAction::Chat(ChatMessage::Username(name)) = name_req {
+                name
+            } else {
+                return Ok(());
+            }
+        }
+        _ => return Ok(()),
+    };
+
+    println!("Got username: {username}");
 
     send_response(
         &mut user.bytes,
         Response::Server(model::ServerResponse::JoinedServer {
-            username: name.clone(),
-        }),
-    )
-    .await;
-
-    send_response(
-        &mut user.bytes,
-        Response::Server(model::ServerResponse::JoinedRoom {
-            room_name: "main".to_string(),
+            username: username.clone(),
         }),
     )
     .await;
 
     {
         let mut state = state.lock().await;
-        //state.add_user_to_room(&addr, "main")?;
+        state.add_user_to_room(&addr, "main")?;
 
         // do some validation here...
-        let b_msg = format!("{} has joined the chat.", name);
-        //state.broadcast(&addr, &b_msg, None, "main").await;
+        state
+            .broadcast(&addr, &format!("{name} has joined the chat."), None, "main")
+            .await;
     }
 
     loop {
@@ -205,10 +204,10 @@ async fn process(
             result = user.bytes.next() => match result {
                 Some(Ok(msg)) => {
                     let req: UserAction = bincode::deserialize(&msg[..]).unwrap();
-                    match request::handle_request(msg, state.clone(), &mut user.bytes, &addr, &name, &req.room_name).await {
+                    match request::handle_request(&req, state.clone(), &mut user.bytes, &addr, &name).await {
                         Ok(_) => {},
                         Err(e) => {
-                            send_response(&mut user.bytes, Response::server_msg(&format!("ERROR: {e}"), &req.room_name)).await;
+                            send_response(&mut user.bytes, Response::server_msg(&format!("ERROR: {e}"), "main")).await;
                         },
                     }
                 }
